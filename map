@@ -1,1 +1,101 @@
+package com.example.finals
 
+import android.hardware.*
+import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.*
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.*
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.unit.*
+import java.util.Locale
+import kotlin.math.*
+
+class MainActivity : ComponentActivity(), SensorEventListener {
+    private lateinit var sensorManager: SensorManager
+
+    // 穩定參數與校準係數 (0.46f 為你的最終標定值)
+    private val metersPerUnit = 0.46f
+    private val stepThreshold = 8.5f
+    private val stepLength = 40f
+
+    private var isTracking by mutableStateOf(false)
+    private var currentDegree by mutableFloatStateOf(0f)
+    private val pathPoints = mutableStateListOf<Offset>()
+    private var calculatedArea by mutableDoubleStateOf(0.0)
+    private var lastStepTime = 0L
+    private var lastMagnitude = 0f
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        sensorManager = getSystemService(SENSOR_SERVICE) as SensorManager
+        setContent {
+            Column(modifier = Modifier.fillMaxSize().background(Color.Black).padding(16.dp)) {
+                // 控制區
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+                    Button(onClick = { isTracking = true }) { Text("開始") }
+                    Button(onClick = { isTracking = false }) { Text("停止") }
+                    Button(onClick = { pathPoints.clear(); calculatedArea = 0.0; isTracking = false }) { Text("重置") }
+                }
+
+                Text("即時面積: ${String.format(Locale.US, "%.2f", calculatedArea)} m²",
+                    color = Color.Green, fontSize = 28.sp)
+
+                Canvas(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                    if (pathPoints.isNotEmpty()) {
+                        val cx = size.width / 2; val cy = size.height / 2
+                        val p = Path().apply { moveTo(cx + pathPoints[0].x, cy + pathPoints[0].y) }
+                        pathPoints.forEach { p.lineTo(cx + it.x, cy + it.y) }
+                        p.lineTo(cx + pathPoints[0].x, cy + pathPoints[0].y) // 自動閉合
+                        drawPath(p, Color.Green, style = Stroke(8f))
+                    }
+                }
+            }
+        }
+    }
+
+    override fun onSensorChanged(event: SensorEvent) {
+        if (!isTracking) return
+
+        if (event.sensor.type == Sensor.TYPE_ROTATION_VECTOR) {
+            val r = FloatArray(9); SensorManager.getRotationMatrixFromVector(r, event.values)
+            val o = FloatArray(3); SensorManager.getOrientation(r, o)
+            currentDegree = (Math.toDegrees(o[0].toDouble()).toFloat() + 360f) % 360f
+        } else if (event.sensor.type == Sensor.TYPE_ACCELEROMETER) {
+            val m = sqrt(event.values.map { it.pow(2) }.sum())
+            val now = System.currentTimeMillis()
+
+            // 加入時間濾波 (400ms) 與 加速度閾值判斷
+            if (lastMagnitude > stepThreshold && m < stepThreshold && (now - lastStepTime > 300)) {
+                lastStepTime = now
+                val rad = Math.toRadians(currentDegree.toDouble())
+                val last = if (pathPoints.isEmpty()) Offset(0f, 0f) else pathPoints.last()
+
+                // 直接計算目標點，取消 0.8f 平滑處理，反應會變極快
+                val nextX = last.x + (sin(rad) * stepLength).toFloat()
+                val nextY = last.y - (cos(rad) * stepLength).toFloat()
+
+                pathPoints.add(Offset(nextX, nextY))
+
+                // 鞋帶公式更新面積
+                if (pathPoints.size >= 3) {
+                    var s = 0.0
+                    for (i in 0 until pathPoints.size - 1) s += (pathPoints[i].x * pathPoints[i+1].y - pathPoints[i+1].x * pathPoints[i].y)
+                    s += (pathPoints.last().x * pathPoints[0].y - pathPoints[0].x * pathPoints.last().y)
+                    calculatedArea = abs(s) / 2.0 / stepLength.pow(2) * metersPerUnit.pow(2)
+                }
+            }
+            lastMagnitude = m
+        }
+    }
+
+    override fun onAccuracyChanged(s: Sensor?, a: Int) {}
+    override fun onResume() { super.onResume(); sensorManager.registerListener(this, sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER), SensorManager.SENSOR_DELAY_UI); sensorManager.registerListener(this, sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR), SensorManager.SENSOR_DELAY_UI) }
+    override fun onPause() { super.onPause(); sensorManager.unregisterListener(this) }
+}
